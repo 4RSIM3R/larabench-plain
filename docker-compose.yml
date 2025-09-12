@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  laravel-benchmark:
+    build: 
+      context: .
+      dockerfile: Dockerfile.plain
+    container_name: laravel-benchmark
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage/app/public/benchmarks:/var/www/html/storage/app/public/benchmarks
+      - ./storage/logs:/var/www/html/storage/logs
+      - ./database/database.sqlite:/var/www/html/database/database.sqlite
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - LOG_LEVEL=info
+    networks:
+      - benchmark-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/benchmark/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: nginx-exporter
+    ports:
+      - "9113:9113"
+    command:
+      - -nginx.scrape-uri=http://laravel-benchmark:8000/nginx_status
+    depends_on:
+      - laravel-benchmark
+    networks:
+      - benchmark-network
+    profiles:
+      - monitoring
+
+networks:
+  benchmark-network:
+    driver: bridge
+
+volumes:
+  benchmark-results:
+    driver: local

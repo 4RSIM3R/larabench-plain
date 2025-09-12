@@ -1,0 +1,188 @@
+# Dockerfile for Plain Laravel (With OPcache)
+FROM php:8.4-fpm-alpine
+
+# Set working directory
+WORKDIR /var/www/html
+
+# Install system dependencies
+RUN apk add --no-cache \
+    git \
+    curl \
+    libpng-dev \
+    libxml2-dev \
+    zip \
+    unzip \
+    oniguruma-dev \
+    libzip-dev \
+    freetype-dev \
+    libjpeg-turbo-dev \
+    libwebp-dev \
+    nginx \
+    supervisor
+
+# Install PHP extensions
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg --with-webp \
+    && docker-php-ext-install \
+    pdo_mysql \
+    mbstring \
+    exif \
+    pcntl \
+    bcmath \
+    gd \
+    zip \
+    opcache
+
+# Install Redis extension
+RUN apk add --no-cache --virtual .build-deps $PHPIZE_DEPS \
+    && pecl install redis \
+    && docker-php-ext-enable redis \
+    && apk del .build-deps
+
+# Get latest Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Copy existing application directory contents
+COPY . /var/www/html
+
+# Copy existing application directory permissions
+COPY --chown=www-data:www-data . /var/www/html
+
+# Install PHP dependencies
+RUN composer install
+
+# Create necessary directories and set permissions
+RUN mkdir -p /var/www/html/storage/logs \
+    && mkdir -p /var/www/html/storage/framework/cache \
+    && mkdir -p /var/www/html/storage/framework/sessions \
+    && mkdir -p /var/www/html/storage/framework/views \
+    && mkdir -p /var/www/html/bootstrap/cache \
+    && chown -R www-data:www-data /var/www/html/storage \
+    && chown -R www-data:www-data /var/www/html/bootstrap/cache \
+    && chmod -R 775 /var/www/html/storage \
+    && chmod -R 775 /var/www/html/bootstrap/cache
+
+# Copy nginx configuration
+COPY <<EOF /etc/nginx/nginx.conf
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    
+    log_format main '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                    '\$status \$body_bytes_sent "\$http_referer" '
+                    '"\$http_user_agent" "\$http_x_forwarded_for"';
+    
+    access_log /var/log/nginx/access.log main;
+    
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    
+    server {
+        listen 80;
+        server_name _;
+        root /var/www/html/public;
+        index index.php index.html index.htm;
+        
+        location / {
+            try_files \$uri \$uri/ /index.php?\$query_string;
+        }
+        
+        location ~ \.php\$ {
+            fastcgi_pass 127.0.0.1:9000;
+            fastcgi_index index.php;
+            fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+            include fastcgi_params;
+        }
+        
+        location ~ /\.ht {
+            deny all;
+        }
+    }
+}
+EOF
+
+# Copy PHP-FPM configuration
+COPY <<EOF /usr/local/etc/php-fpm.d/www.conf
+[www]
+user = www-data
+group = www-data
+listen = 127.0.0.1:9000
+listen.owner = www-data
+listen.group = www-data
+pm = dynamic
+pm.max_children = 50
+pm.start_servers = 5
+pm.min_spare_servers = 5
+pm.max_spare_servers = 35
+pm.process_idle_timeout = 10s
+EOF
+
+# Copy PHP configuration (With OPcache optimized)
+COPY <<EOF /usr/local/etc/php/php.ini
+memory_limit = 512M
+upload_max_filesize = 100M
+post_max_size = 100M
+max_execution_time = 300
+max_input_time = 300
+max_input_vars = 3000
+date.timezone = UTC
+
+; Enable and optimize OPcache
+opcache.enable = 1
+opcache.enable_cli = 1
+opcache.memory_consumption = 256
+opcache.interned_strings_buffer = 16
+opcache.max_accelerated_files = 20000
+opcache.revalidate_freq = 0
+opcache.validate_timestamps = 0
+opcache.save_comments = 0
+opcache.fast_shutdown = 1
+opcache.enable_file_override = 1
+opcache.optimization_level = 0x7FFEBFFF
+opcache.file_cache = /tmp/opcache
+opcache.file_cache_only = 0
+opcache.file_cache_consistency_checks = 0
+EOF
+
+# Create OPcache directory
+RUN mkdir -p /tmp/opcache && chown -R www-data:www-data /tmp/opcache
+
+# Copy supervisor configuration
+COPY <<EOF /etc/supervisor/conf.d/supervisord.conf
+[supervisord]
+nodaemon=true
+
+[program:php-fpm]
+command=php-fpm
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/php-fpm.err.log
+stdout_logfile=/var/log/php-fpm.out.log
+
+[program:nginx]
+command=nginx -g 'daemon off;'
+autostart=true
+autorestart=true
+stderr_logfile=/var/log/nginx.err.log
+stdout_logfile=/var/log/nginx.out.log
+EOF
+
+# Set environment variable to identify configuration
+ENV BENCHMARK_CONFIG="plain-opcache"
+
+# Expose port 80
+EXPOSE 80
+
+# Start supervisor
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

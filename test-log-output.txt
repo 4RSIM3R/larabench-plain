@@ -1,0 +1,8 @@
+time="2025-09-12T03:37:31+07:00" level=info msg="🧪 Testing benchmark result recording..." source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="📊 Test scenarios recorded:" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="  test_success: 1 requests, 1 successes, 0 failures" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="  test_failure: 1 requests, 0 successes, 1 failures" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="BENCHMARK_JSON_START" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="{\"timestamp\":\"2025-09-12T03:37:31.422Z\",\"config\":\"test-config\",\"scenarios\":{\"test_success\":{\"requests\":1,\"successes\":1,\"failures\":0,\"totalDuration\":150,\"avgDuration\":150,\"minDuration\":150,\"maxDuration\":150,\"errors\":[]},\"test_failure\":{\"requests\":1,\"successes\":0,\"failures\":1,\"totalDuration\":300,\"avgDuration\":300,\"minDuration\":300,\"maxDuration\":300,\"errors\":[{\"status\":500,\"url\":\"http://test.com/api/fail\",\"error\":\"Internal Server Error\",\"timestamp\":\"2025-09-12T03:37:31.427Z\"}]}},\"summary\":{\"totalRequests\":2,\"totalSuccesses\":1,\"totalFailures\":1,\"overallSuccessRate\":\"50.00\"}}" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="BENCHMARK_JSON_END" source=console
+time="2025-09-12T03:37:31+07:00" level=info msg="✅ Test completed successfully!" source=console

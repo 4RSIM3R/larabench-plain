@@ -1,0 +1,238 @@
+# Dockerfile for Laravel Benchmark Application
+FROM php:8.4-fpm-alpine
+
+# Install system dependencies
+RUN apk add --no-cache \
+    nginx \
+    supervisor \
+    curl \
+    zip \
+    unzip \
+    git \
+    sqlite \
+    && rm -rf /var/cache/apk/*
+
+# Install PHP extensions required by Laravel
+RUN docker-php-ext-install -j$(nproc) \
+    pdo \
+    pdo_sqlite \
+    bcmath \
+    opcache
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Configure PHP for benchmarking (same as your CLI config)
+RUN echo "memory_limit=512M" >> /usr/local/etc/php/conf.d/benchmark.ini && \
+    echo "max_execution_time=300" >> /usr/local/etc/php/conf.d/benchmark.ini && \
+    echo "display_errors=On" >> /usr/local/etc/php/conf.d/benchmark.ini && \
+    echo "log_errors=On" >> /usr/local/etc/php/conf.d/benchmark.ini
+
+# Disable OPcache explicitly for consistent benchmarking
+RUN echo "opcache.enable=0" >> /usr/local/etc/php/conf.d/opcache.ini && \
+    echo "opcache.enable_cli=0" >> /usr/local/etc/php/conf.d/opcache.ini
+
+# Configure PHP-FPM
+RUN echo "pm.max_children = 10" >> /usr/local/etc/php-fpm.d/www.conf && \
+    echo "pm.start_servers = 3" >> /usr/local/etc/php-fpm.d/www.conf && \
+    echo "pm.min_spare_servers = 2" >> /usr/local/etc/php-fpm.d/www.conf && \
+    echo "pm.max_spare_servers = 4" >> /usr/local/etc/php-fpm.d/www.conf && \
+    echo "pm.max_requests = 200" >> /usr/local/etc/php-fpm.d/www.conf
+
+# Configure Nginx
+COPY <<EOF /etc/nginx/nginx.conf
+user nginx;
+worker_processes auto;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # Logging
+    log_format main '\$remote_addr - \$remote_user [\$time_local] "\$request" '
+                    '\$status \$body_bytes_sent "\$http_referer" '
+                    '"\$http_user_agent" "\$http_x_forwarded_for" '
+                    'rt=\$request_time uct="\$upstream_connect_time" '
+                    'uht="\$upstream_header_time" urt="\$upstream_response_time"';
+
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log warn;
+
+    # Performance settings
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    client_max_body_size 100M;
+    
+    # Timeouts for long-running benchmark requests
+    proxy_connect_timeout 300s;
+    proxy_send_timeout 300s;
+    proxy_read_timeout 300s;
+    fastcgi_send_timeout 300s;
+    fastcgi_read_timeout 300s;
+
+    # Gzip
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+EOF
+
+# Laravel site configuration
+COPY <<EOF /etc/nginx/conf.d/laravel.conf
+server {
+    listen 8000;
+    server_name localhost;
+    root /var/www/html/public;
+    index index.php;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # Laravel specific
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_pass localhost:9000;
+        fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
+        include fastcgi_params;
+        
+        # Increase timeouts for benchmark operations
+        fastcgi_read_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_connect_timeout 300;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
+    }
+
+    # Benchmark results endpoint - serve static files
+    location /benchmark-results/ {
+        alias /var/www/html/storage/app/public/benchmarks/;
+        add_header Content-Type application/json;
+        add_header Access-Control-Allow-Origin *;
+    }
+}
+EOF
+
+# Supervisor configuration
+COPY <<EOF /etc/supervisord.conf
+[supervisord]
+nodaemon=true
+user=root
+logfile=/var/log/supervisord.log
+pidfile=/var/run/supervisord.pid
+
+[program:php-fpm]
+command=php-fpm -F
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autorestart=false
+startretries=0
+
+[program:nginx]
+command=nginx -g 'daemon off;'
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autorestart=false
+startretries=0
+EOF
+
+# Set working directory
+WORKDIR /var/www/html
+
+# Copy application files (assumes you're building from Laravel project root)
+COPY . .
+
+# Create required directories
+RUN mkdir -p /var/www/html/storage/logs \
+    /var/www/html/storage/framework/cache \
+    /var/www/html/storage/framework/sessions \
+    /var/www/html/storage/framework/views \
+    /var/www/html/storage/app/public/benchmarks \
+    /var/www/html/bootstrap/cache \
+    /var/log/nginx
+
+# Install PHP dependencies
+RUN composer install
+
+# Set up Laravel
+RUN php artisan config:cache && \
+    php artisan route:cache && \
+    php artisan view:cache
+
+# Set permissions
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache && \
+    chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
+
+# Create Laravel environment file for benchmarking
+RUN echo "APP_NAME='Laravel Benchmark'" > .env && \
+    echo "APP_ENV=production" >> .env && \
+    echo "APP_KEY=" >> .env && \
+    echo "APP_DEBUG=false" >> .env && \
+    echo "APP_URL=http://localhost:8000" >> .env && \
+    echo "" >> .env && \
+    echo "LOG_CHANNEL=single" >> .env && \
+    echo "LOG_DEPRECATIONS_CHANNEL=null" >> .env && \
+    echo "LOG_LEVEL=info" >> .env && \
+    echo "" >> .env && \
+    echo "DB_CONNECTION=sqlite" >> .env && \
+    echo "DB_DATABASE=/var/www/html/storage/database.sqlite" >> .env && \
+    echo "" >> .env && \
+    echo "BROADCAST_DRIVER=log" >> .env && \
+    echo "CACHE_DRIVER=file" >> .env && \
+    echo "FILESYSTEM_DISK=local" >> .env && \
+    echo "QUEUE_CONNECTION=sync" >> .env && \
+    echo "SESSION_DRIVER=file" >> .env && \
+    echo "SESSION_LIFETIME=120" >> .env
+
+# Generate application key and create SQLite database
+RUN php artisan key:generate && \
+    touch /var/www/html/storage/database.sqlite && \
+    php artisan migrate --force
+
+# Health check script
+RUN echo '#!/bin/sh' > /usr/local/bin/healthcheck.sh && \
+    echo 'curl -f http://localhost:8000/api/benchmark/health || exit 1' >> /usr/local/bin/healthcheck.sh && \
+    chmod +x /usr/local/bin/healthcheck.sh
+
+# Add startup script to show benchmark results location
+RUN echo '#!/bin/sh' > /usr/local/bin/startup-info.sh && \
+    echo 'echo "🚀 Laravel Benchmark Server Starting..."' >> /usr/local/bin/startup-info.sh && \
+    echo 'echo "📊 Access endpoints at: http://localhost:8000/api/benchmark/"' >> /usr/local/bin/startup-info.sh && \
+    echo 'echo "📁 Benchmark results will be stored in: /var/www/html/storage/app/public/benchmarks/"' >> /usr/local/bin/startup-info.sh && \
+    echo 'echo "🌐 View results at: http://localhost:8000/benchmark-results/"' >> /usr/local/bin/startup-info.sh && \
+    echo 'echo "💡 Use K6 script to run load tests"' >> /usr/local/bin/startup-info.sh && \
+    echo 'echo ""' >> /usr/local/bin/startup-info.sh && \
+    chmod +x /usr/local/bin/startup-info.sh
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh
+
+# Start services
+CMD ["/bin/sh", "-c", "/usr/local/bin/startup-info.sh && exec supervisord -c /etc/supervisord.conf"]
